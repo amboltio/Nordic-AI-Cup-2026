@@ -1,0 +1,112 @@
+{
+  "frame": 14,
+  "pose": {
+    "x": 33.76490994774661,
+    "y": 191.49039895520357,
+    "z": -600
+  },
+  "annotations": [
+    {
+      "object_id": "large_launcher",
+      "bbox": [
+        3611,
+        1226,
+        3767,
+        1336
+      ]
+    },
+    {
+      "object_id": "spacecraft",
+      "bbox": [
+        1483,
+        1539,
+        1529,
+        1588
+      ]
+    },
+    {
+      "object_id": "jet_plane",
+      "bbox": [
+        2220,
+        556,
+        2297,
+        638
+      ]
+    },
+    {
+      "object_id": "large_tower",
+      "bbox": [
+        3476,
+        407,
+        3538,
+        472
+      ]
+    },
+    {
+      "object_id": "medium_launcher",
+      "bbox": [
+        3719,
+        0,
+        3765,
+        17
+      ]
+    },
+    {
+      "object_id": "small_launcher",
+      "bbox": [
+        1775,
+        1051,
+        1797,
+        1081
+      ]
+    },
+    {
+      "object_id": "tank",
+      "bbox": [
+        787,
+        756,
+        838,
+        804
+      ]
+    },
+    {
+      "object_id": "helicopter",
+      "bbox": [
+        2267,
+        1808,
+        2388,
+        1908
+      ]
+    },
+    {
+      "object_id": "small_tower",
+      "bbox": [
+        2690,
+        1745,
+        2750,
+        1803
+      ]
+    },
+    {
+      "object_id": "ta-ta",
+      "bbox": [
+        1015,
+        1136,
+        1048,
+        1153
+      ]
+    }
+  ],
+  "object_counts": {
+    "helicopter": 1,
+    "jet_plane": 1,
+    "large_launcher": 1,
+    "large_tower": 1,
+    "medium_launcher": 1,
+    "small_launcher": 1,
+    "small_tower": 1,
+    "spacecraft": 1,
+    "ta-ta": 1,
+    "tank": 1
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "capture": {
+    "camera_name": "GimbalCamera",
+    "altitude_m": 600,
+    "num_frames": 25,
+    "step_m": 13.8888889
+
+  },
+  "total_objects": 17,
+  "object_totals": {
+    "mine_roller": 1,
+    "jet_plane": 1,
+    "condor": 1,
+    "helicopter": 1,
+    "jammer": 1,
+    "small_launcher": 1,
+    "medium_plane": 1,
+    "small_plane": 1,
+    "car": 1,
+    "spacecraft": 1,
+    "medium_launcher": 1,
+    "hangar": 1,
+    "tank": 1,
+    "ta-ta": 1,
+    "large_tower": 1,
+    "small_tower": 1,
+    "large_launcher": 1
+  }
+}

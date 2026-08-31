@@ -1,0 +1,14 @@
+# Lower bounds rather than exact pins, deliberately: you will almost certainly
+# be installing a detection stack (torch, ultralytics, ...) alongside these,
+# and hard pins here would fight it. Verified against the versions in brackets.
+
+fastapi>=0.115            # [0.141.1]
+uvicorn>=0.30             # [0.52.4]
+pydantic>=2.7,<3          # [2.13.4]
+numpy>=1.26               # [2.5.2]
+opencv-python>=4.9        # [5.0.0.93]
+requests>=2.31            # [2.34.2]
+
+# Only needed by local_evaluator.py. It is the same scorer the competition
+# uses, and the same version range.
+faster-coco-eval>=1.7.2,<2  # [1.7.2]

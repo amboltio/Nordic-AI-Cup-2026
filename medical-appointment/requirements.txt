@@ -1,0 +1,10 @@
+# Lower bounds rather than exact pins, deliberately: you will almost certainly
+# be installing an ASR stack (torch, faster-whisper, ...) alongside these, and
+# hard pins here would fight it. Verified against the versions in brackets.
+
+fastapi>=0.115            # [0.127.0]
+uvicorn>=0.30             # [0.40.0]
+pydantic>=2.7,<3          # [2.12.5]
+
+# Only needed by local_evaluator.py.
+requests>=2.31            # [2.32.5]
