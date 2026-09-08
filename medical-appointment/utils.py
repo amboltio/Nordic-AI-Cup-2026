@@ -8,19 +8,27 @@ conversations.
 There is deliberately no audio dependency. ``audio_duration_seconds`` reads the
 MP3 frame header directly, so ``pip install -r requirements.txt`` does not drag
 in a decoding stack that would fight whatever ASR you end up choosing.
+
+``gold_evidence`` and ``evidence_iou`` are the other half of the case: the
+supplied questions carry the span of audio the answer was read off, and the
+score is part accuracy, part how well your spans line up with those.
 """
 
 import base64
 import collections
 import csv
+import math
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dtos import ASRQuestionResponseDto
 
 DATA_DIRECTORY = Path(__file__).resolve().parent / 'data'
 AUDIO_DIRECTORY = DATA_DIRECTORY / 'audio'
-QUESTIONS_CSV = DATA_DIRECTORY / 'questions_sample.csv'
+QUESTIONS_CSV = DATA_DIRECTORY / 'question_train.csv'
+
+# A span of audio, in seconds from the start of the conversation.
+Span = Tuple[float, float]
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +89,103 @@ def audio_duration_seconds(audio_bytes: bytes) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- #
+# Evidence and scoring
+# --------------------------------------------------------------------------- #
+#
+# Ported from the evaluation service so a local number means the same thing as a
+# real one. If you change anything here you are no longer measuring what you
+# will be scored on.
+
+def evidence_interval(start: Any, end: Any) -> Optional[Span]:
+    """Read one evidence interval, from the annotations or from a prediction.
+
+    An interval only counts if both timestamps are there, are real numbers and
+    are the right way round. Everything else — a missing timestamp, a blank
+    annotation cell, ``None``, a NaN, text, an end before its start — is no
+    interval at all. Deliberately lenient: a prediction like that scores a
+    temporal IoU of 0 rather than raising.
+    """
+    if start is None or end is None:
+        return None
+
+    try:
+        start = float(start)
+        end = float(end)
+    except (TypeError, ValueError):
+        return None
+
+    if not (math.isfinite(start) and math.isfinite(end)) or end < start:
+        return None
+
+    return start, end
+
+
+def gold_evidence(row: Dict[str, str]) -> Optional[Span]:
+    """The annotated span for one CSV row, or ``None`` if it has none.
+
+    Only the ``positive`` rows carry evidence; a ``hard_negative`` or
+    ``off_topic`` row has both cells blank, because a no answer has nothing to
+    point at.
+    """
+    return evidence_interval(row.get('evidence_start'), row.get('evidence_end'))
+
+
+def temporal_iou(ground_truth: Span, prediction: Optional[Span]) -> float:
+    """Overlap between the annotated and the predicted span.
+
+    Measured as a fraction of the stretch the two of them cover together.
+    Intervals that do not touch score 0, identical intervals score 1, and no
+    prediction at all scores 0.
+    """
+    if prediction is None:
+        return 0.0
+
+    ground_truth_start, ground_truth_end = ground_truth
+    prediction_start, prediction_end = prediction
+
+    intersection = max(
+        0.0,
+        min(ground_truth_end, prediction_end)
+        - max(ground_truth_start, prediction_start),
+    )
+    union = (
+        max(ground_truth_end, prediction_end)
+        - min(ground_truth_start, prediction_start)
+    )
+
+    if union <= 0:
+        return 0.0
+
+    return intersection / union
+
+
+def mean_temporal_iou(
+    labels: List[int],
+    ground_truths: List[Optional[Span]],
+    predictions: List[Optional[Span]],
+) -> float:
+    """Mean temporal IoU over the questions that have evidence to find.
+
+    The denominator is fixed by the annotations, not by what you answered: every
+    question whose annotated answer is yes counts, so one you answered no — or
+    returned no usable span for — contributes 0 rather than being left out. No
+    questions have nothing to point at and are excluded entirely, so a span
+    volunteered alongside a no can neither help nor hurt.
+    """
+    scores = [
+        temporal_iou(ground_truth, prediction)
+        for label, ground_truth, prediction
+        in zip(labels, ground_truths, predictions)
+        if label == 1 and ground_truth is not None
+    ]
+
+    if not scores:
+        return 0.0
+
+    return sum(scores) / len(scores)
+
+
+# --------------------------------------------------------------------------- #
 # Checking your own response
 # --------------------------------------------------------------------------- #
 
@@ -90,10 +195,12 @@ def validate_response(
 ) -> None:
     """Raise if the response would not survive the evaluator.
 
-    The length check is the one that matters. The service matches answers to
-    questions by position, so a list of the wrong length is not partially
-    credited — the whole conversation is scored wrong. Failing here, loudly, in
-    your own logs beats losing ten marks silently.
+    The length checks are the ones that matter. The service matches answers and
+    evidence to questions by position, so a list of the wrong length is not
+    partially credited — it cannot be scored at all, and the whole conversation
+    is scored wrong. That now includes the two evidence lists: getting one of
+    them wrong costs you the answers as well, not just the evidence. Failing
+    here, loudly, in your own logs beats losing ten marks silently.
     """
     if not isinstance(response, ASRQuestionResponseDto):
         raise ValueError(
@@ -117,6 +224,55 @@ def validate_response(
             raise ValueError(
                 f'answers[{position}] must be a bool, got '
                 f'{type(answer).__name__}.'
+            )
+
+    for name in ('evidence_start', 'evidence_end'):
+        values = getattr(response, name)
+
+        if not isinstance(values, list):
+            raise ValueError(
+                f'{name} must be a list, got {type(values).__name__}.'
+            )
+
+        if len(values) != expected_count:
+            raise ValueError(
+                f'{name} must have one entry per question: expected '
+                f'{expected_count}, got {len(values)}.'
+            )
+
+        for position, value in enumerate(values):
+            if value is None:
+                continue
+
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(
+                    f'{name}[{position}] must be a number of seconds or None, '
+                    f'got {type(value).__name__}.'
+                )
+
+            if not math.isfinite(value):
+                raise ValueError(
+                    f'{name}[{position}] must be a finite number of seconds, '
+                    f'got {value!r}.'
+                )
+
+    # A span the service cannot read scores zero rather than raising, so this is
+    # the last place a reversed or half-filled interval is still cheap to spot.
+    for position, (start, end) in enumerate(
+        zip(response.evidence_start, response.evidence_end)
+    ):
+        if (start is None) != (end is None):
+            raise ValueError(
+                f'evidence_start[{position}] and evidence_end[{position}] must '
+                'either both be set or both be None; a half-filled interval '
+                'scores nothing.'
+            )
+
+        if start is not None and end < start:
+            raise ValueError(
+                f'evidence_end[{position}] ({end}) is before '
+                f'evidence_start[{position}] ({start}); that interval scores '
+                'nothing.'
             )
 
 
