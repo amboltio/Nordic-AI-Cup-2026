@@ -111,8 +111,8 @@ def source_bbox_to_view(
     """Map a source-pixel box into coordinates normalized to the transmitted view.
 
     The inverse of :func:`view_bbox_to_source`. Useful for drawing on the image
-    you received, or for cropping a known object out of it. It is *not* the
-    conversion a response needs - see :func:`source_bbox_to_global`.
+    you received, or for cropping a known object out of it. A response uses
+    :func:`source_bbox_to_global`.
     """
     x1, y1, x2, y2 = (float(c) for c in bbox)
     source_x1, source_y1, source_x2, source_y2 = source_region_xyxy
@@ -154,8 +154,8 @@ def global_bbox_to_source(
     """Scale a frame-global box back into source pixels.
 
     The inverse of :func:`source_bbox_to_global`, and exactly what the
-    evaluator does to your annotations before it scores them. Note what it does
-    *not* do: it never consults ``source_region_xyxy``.
+    evaluator does to your annotations before it scores them: a plain scale by
+    the frame dimensions.
     """
     x1, y1, x2, y2 = (float(c) for c in bbox)
     return (
@@ -179,8 +179,9 @@ def view_bbox_to_global(
 
         view-normalized -> source pixels -> frame-global
 
-    At Level 0 the crop is the whole frame, so this is the identity. At Level 1
-    and Level 2 it is not, and skipping it puts every box in the wrong place.
+    At Level 0 the crop covers the whole frame and the conversion is the
+    identity. At Level 1 and Level 2 the crop is a sub-region, and the
+    conversion places the box in the frame.
     """
     return source_bbox_to_global(
         view_bbox_to_source(bbox, source_region_xyxy),
@@ -218,10 +219,6 @@ def clip_bbox_to_frame(bbox: Sequence[float], epsilon: float = 1e-6):
     A box that has been clipped down to zero width or height is invalid, and
     an invalid box fails the whole response. Returning None here lets you drop
     it instead of losing the frame.
-
-    Worth remembering when you carry detections forward: a remembered object
-    that has drifted off the edge of the frame has to be dropped, not squashed
-    against the border.
     """
     x1, y1, x2, y2 = (float(c) for c in bbox)
     x1, x2 = max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))

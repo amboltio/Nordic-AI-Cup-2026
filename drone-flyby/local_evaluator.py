@@ -351,9 +351,8 @@ def replay(
 
             if response is not None:
                 statistics.responses_accepted += 1
-                # Responses are global, so this is a plain scale by the frame
-                # size. The view's source_region_xyxy plays no part here, which
-                # is exactly what lets you answer for objects you cannot see.
+                # Responses are global, so this is a plain scale by the
+                # frame size, and it accepts boxes anywhere in the frame.
                 predictions[frame] = [
                     {
                         'object_id': annotation.object_id,

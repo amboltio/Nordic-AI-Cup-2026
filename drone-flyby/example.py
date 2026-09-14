@@ -6,12 +6,10 @@ the evaluator expects, and drive the camera without ever sending an illegal
 command. Replace ``detect`` with your model and ``choose_next_view`` with your
 camera policy.
 
-It is deliberately stateless. It answers with what it can see right now, which
-means that every time it zooms to Level 1 or Level 2 it stops reporting the
-rest of the frame - and a frame's ground truth counts whether or not the camera
-was pointed at it. Carrying detections forward between frames is the obvious
-first improvement; the README's "Memory and tracking" section describes what
-that involves and where it goes wrong.
+It is stateless. Each response contains the detections made on the view that
+arrived with that request, so at Level 1 and Level 2 it reports only the region
+the camera is pointed at, while a frame's ground truth covers the whole source
+frame.
 
 Run ``python local_evaluator.py`` to see what it scores. It will be close to
 zero, which is the honest starting point.
@@ -114,11 +112,9 @@ def detect(
 
     annotations: List[DroneFlybyPredictionDto] = []
     for area_ratio, (x, y, box_width, box_height) in proposals[:MAXIMUM_PROPOSALS]:
-        # Boxes leave your model in the pixels of this 960x540 image. Getting
-        # them to the evaluator takes two steps: normalize to the view, then
+        # Boxes leave your model in the pixels of this 960x540 image. Two
+        # steps put them in response coordinates: normalize to the view, then
         # lift that through source_region_xyxy into frame-global coordinates.
-        # At Level 0 the second step changes nothing; at Level 1 and Level 2 it
-        # is the difference between a hit and a box in the wrong place.
         view_bbox = (
             x / width,
             y / height,

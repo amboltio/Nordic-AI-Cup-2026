@@ -76,9 +76,10 @@ INPUT   the current camera crop
 OUTPUT  your best prediction for the complete current source frame
 ```
 
-The camera position carries over from frame to frame. That makes this three
-problems at once: recognise objects in the view you have, remember the ones you
-are no longer looking at, and decide where the camera should point next.
+The camera position carries over from frame to frame. 
+This makes the challenge a combination of object detection and camera control: 
+recognise objects in the current view, return predictions for the full source frame, and decide where the camera should point next.
+
 
 ## Resolution levels
 
@@ -129,11 +130,11 @@ simply normalized by `original_width` and `original_height`.
 
 ## Your goal
 
-Report every object you can, with the right class, a tight box and a confidence
-score. Small objects are hard to recognise in the downsampled Level-0 view, so
-zooming pays — and because your answer covers the whole frame, zooming costs you
-nothing you were not free to keep reporting from memory. The camera only moves
-once per frame, so where you point it is a real decision.
+Report every object you can, with the right class, a tight box and a confidence score. 
+Small objects are hard to recognise in the downsampled Level-0 view, so zooming can provide more detail. 
+Your response still covers the full source frame, while the camera view determines which region you observe in detail. 
+The camera only moves once per frame, so where you point it is a real decision.
+
 
 ## What the evaluator sends you
 
@@ -257,6 +258,10 @@ Each annotation needs:
 }
 ```
 
+The `car` sits inside the Level-2 crop this request carried. The `hangar` is at
+source `(384, 432)` to `(691, 562)`, outside that crop, and is a valid
+annotation: a response covers the whole source frame.
+
 ### Boxes are global
 
 **Boxes are normalized to the full source frame, not to the image you
@@ -276,15 +281,6 @@ source_x = global_x * original_width
 source_y = global_y * original_height
 ```
 
-Two consequences worth being explicit about:
-
-- **Objects outside the current crop are valid annotations.** A detection you
-  made three frames ago, while the camera was somewhere else, is a perfectly
-  good answer now.
-- **A detection made on the transmitted image has to be converted.** It comes
-  out of your model in view coordinates, and it has to reach the evaluator in
-  global ones:
-
 ```text
 local detection in the 960x540 view
   -> map through source_region_xyxy    (source pixels)
@@ -294,14 +290,11 @@ local detection in the 960x540 view
 
 `utils.view_bbox_to_global` does all three steps in one call.
 
-At **Level 0** the crop *is* the frame, so the two systems coincide and the
-conversion is the identity — which is why a Level-0-only solution barely
-notices any of this. At Level 1 and Level 2 they do not coincide, and skipping
-the conversion puts every box in the wrong place.
+At **Level 0**, the crop covers the full source frame, so view and global normalized coordinates are identical. At **Level 1** and **Level 2**, the conversion is required.
 
 ### A worked Level-2 example
 
-Take the request further up: Level 2, centre `(2200, 900)`, so
+For a Level-2 request with centre `(2200, 900)`,
 `source_region_xyxy` is `[1720, 630, 2680, 1170]` — a 960x540 region sent at
 native size.
 
@@ -324,77 +317,6 @@ from utils import view_bbox_to_global
 view_bbox_to_global([0.40, 0.50, 0.46, 0.56], [1720, 630, 2680, 1170], 3840, 2160)
 # (0.5479, 0.4167, 0.5629, 0.4317)
 ```
-
-Now suppose you also spotted a hangar several frames ago, back when the camera
-was at Level 0, at global `[0.10, 0.20, 0.18, 0.26]`. In source pixels that is
-around `(384, 432)` to `(691, 562)` — nowhere near the current crop, which
-starts at x = 1720. You cannot see it in this frame's image at all.
-
-**Return both.** That is the response shown above, and the hangar counts for
-this frame exactly as the car does.
-
-## Memory and tracking
-
-Because you answer for the whole frame, the natural shape of a solution is to
-keep state between frames:
-
-```text
-tracks = {
-    track_id: {
-        'object_id':       'hangar',
-        'global_bbox':     [x1, y1, x2, y2],
-        'confidence':      0.64,
-        'last_seen_frame': 39,
-        'velocity':        (dx, dy),
-    }
-}
-```
-
-- **Level 0** — sweep the full frame and discover objects, roughly but broadly.
-- **Level 1 / Level 2** — zoom onto one uncertain object, sharpen its class and
-  its box, and keep returning everything else from memory in the same response.
-
-The baseline in `example.py` does none of this. It is stateless, so every time
-it zooms it stops reporting the rest of the frame. That is the first thing
-worth fixing.
-
-### Remembering is not the same as replaying
-
-**Blindly returning old boxes forever does not work.** The drone is moving —
-13.89 m between frames in the supplied scene — so an object's pixels shift every
-frame. A box you stop updating drifts off its object, and once it falls below
-IoU 0.50 it is no longer a detection: it is a false positive *and* the object
-counts as missed. A stale track is worse than no track.
-
-So propagate what you keep:
-
-- Estimate global frame motion between frames — optical flow, a homography, or
-  feature matching on the transmitted images — and move every track by it.
-- Or give each track its own velocity from the frames where you did see it, and
-  extrapolate.
-- **Decay confidence** the longer a track goes unconfirmed, so aging guesses sit
-  below fresh detections in the ranking rather than above them.
-- **Expire stale tracks.** A track you have not confirmed for many frames is a
-  false positive on every frame it survives, and false positives cost precision
-  on every one of them.
-
-### Lifecycle
-
-- **Reset all state when `sequence_id` changes.** A new attempt is a new flight;
-  carrying tracks across is carrying garbage across.
-- **Watch for gaps in `frame_index`.** A gap means frames went by that you never
-  saw, so the world moved further than one step. Propagate by how many frames
-  actually elapsed, not by one.
-- **Objects leave and re-enter the frame.** The drone flies a line, so objects
-  eventually pass out of the source frame entirely. Drop those — a box clipped
-  against the border until it has zero width fails validation and takes the
-  whole response with it. `utils.clip_bbox_to_frame` returns `None` for them.
-- **Zoom transitions change your precision, not your coordinates.** A box
-  refined at Level 2 is far tighter than the Level-0 box it replaces, but both
-  are expressed in the same global system, so merging them is straightforward.
-- **Suppress duplicates before answering.** There is no NMS. A remembered track
-  and a fresh detection of the same object are two boxes, and the second one is
-  a false positive. Match new detections against existing tracks and merge.
 
 ## Camera movement
 
@@ -435,8 +357,8 @@ distance = sqrt((new_x - old_x)^2 + (new_y - old_y)^2)
 
 The limit comes from the level the camera is on **now**, even when you change
 level and centre in the same response. Each limit is half the diagonal of that
-level's view, so a full diagonal move lands the centre on the old view's
-corner, leaving roughly a quarter of the area overlapping.
+level's view, so a full diagonal move lands the requested centre on the current view's corner, 
+leaving roughly a quarter of the area overlapping.
 
 Since a response carries at most one camera command, and you get one request
 per frame, **the camera moves at most once per frame**.
@@ -450,8 +372,7 @@ not the frame.
 
 The reason comes back in `camera_command_feedback` on every following frame
 until you send something usable, so it still reaches you if the next frame gets
-skipped. `utils.describe_camera_rejection` runs the same three checks locally if
-you would rather not find out the slow way.
+skipped. `utils.describe_camera_rejection` runs the same three checks locally.
 
 ## Timing
 
@@ -465,13 +386,11 @@ Those two numbers mean something specific:
 - **What a slow answer costs is the frames that went by while you were busy.**
   Only the newest emitted frame is ever sent, so at 3 fps a 700 ms round trip
   means roughly every second frame never reaches you.
-- **A frame you never see is scored as a frame with no detections.** Its ground
-  truth still counts, so latency costs recall. Memory does not rescue a skipped
-  frame: you never get the chance to answer for it at all.
-- A request that blows the 3333 ms budget is abandoned and recorded as an error.
+- **A frame you never see is scored as a frame with no detections.** Its ground 
+truth still counts, so skipped frames cost recall.
+- A request that exceeds the 3333 ms budget is abandoned and recorded as an error.
 
-Gaps in `frame_index` tell you exactly which frames you lost. Watch that number
-before you tune anything else.
+Gaps in `frame_index` indicate which frames were skipped.
 
 ## Object types
 
@@ -488,26 +407,16 @@ in the order the scorer uses.
 
 Your score is **COCO mAP at IoU 0.50**, between 0 and 1.
 
-The evaluator converts your accepted boxes into source coordinates — a plain
-multiply by `original_width` and `original_height`, with no reference to the
-camera view — then runs Faster-COCO-Eval against the hidden ground truth. AP is
-computed for each class present in the dataset and those class scores are
-averaged, so a class you never detect pulls the mean down as hard as any other.
+Before scoring, all accepted bounding boxes are converted to source-frame coordinates by multiplying by `original_width` and `original_height`. This conversion is independent of the current camera view.
 
-**Each frame is scored against every ground-truth object in it**, not only the
-ones the camera happened to be showing. That is the whole point of the global
-response format: carrying a confident detection forward while you look elsewhere
-is a legitimate and rewarded strategy. It also means a class you stop reporting
-the moment you zoom away from it costs you across every frame you were zoomed.
+Each frame is scored against every ground-truth object in that frame, not only the objects inside the current `source_region_xyxy`. Frames that are skipped or unanswered contribute no detections.
 
-There is no non-maximum suppression. Overlapping duplicates of the same object
-are counted as false positives, so suppress them yourself before answering — and
-that includes a remembered track sitting on top of a fresh detection.
+Faster-COCO-Eval then calculates AP at IoU 0.50. AP is calculated for each class represented in the dataset and macro-averaged.
 
-False positives cost precision, missed objects cost recall, and a box below
-IoU 0.50 with the ground truth is not a detection at all. Confidence decides the
-order predictions are considered in, so calibrate it rather than sending
-everything at `1.0`.
+There is no non-maximum suppression. Overlapping duplicate predictions for the same object are counted as false positives, so suppress duplicates before answering.
+
+False positives reduce precision, missed objects reduce recall, and a prediction below IoU 0.50 with the ground truth does not count as a detection. Confidence determines the order in which predictions are considered during evaluation.
+
 
 ## Validation and evaluation
 
@@ -597,29 +506,11 @@ the host.
 
 Things that quietly cost people points:
 
-- **One bad box loses the whole frame.** A box must satisfy
-  `0 <= x1 < x2 <= 1` and `0 <= y1 < y2 <= 1` *strictly*, now measured against
-  the full source frame. A box you clipped to the frame edge until it had zero
-  width fails validation, and the response is rejected with every other
-  detection in it. `utils.clip_bbox_to_frame` returns `None` for those so you
-  can drop them; `utils.validate_response` catches the rest before they leave
-  your server.
-- **Boxes are global, and nothing will tell you if you get this wrong.** A box
-  normalized to the 960x540 view you received is a perfectly valid box that
-  lands in completely the wrong place at Level 1 and Level 2. It validates, it
-  scores zero, and it looks fine at Level 0 where the two systems coincide. Use
-  `utils.view_bbox_to_global`.
-- **A remembered box you never expire is a false positive on every frame it
-  survives.** Decay confidence, propagate motion, and drop stale tracks.
-- **`requested_view` must contain integers.** `2500.0` is not `2500` here.
-  Round and cast before you answer.
-- **No unknown fields.** The response schema rejects anything it does not
-  recognise, so do not add debugging keys to the payload.
-- **Echo `request_id` and `frame` exactly.** A mismatch is treated as an
-  invalid response.
-- **An unknown or misspelled `object_id` fails the response**, so keep to
-  `dtos.OBJECT_CLASSES`.
-- **Don't let your model raise.** An exception means no response, which means a
-  frame scored as empty. Catch, log, and return what you have.
-- **Warm your model up before the attempt starts.** The first inference is
-  usually the slowest, and there is no grace period for it.
+* **One bad box loses the whole frame.** A box must satisfy `0 <= x1 < x2 <= 1` and `0 <= y1 < y2 <= 1` strictly, measured against the full source frame. A box clipped to the frame edge until it has zero width or height fails validation, and the response is rejected with every other detection in it. `utils.clip_bbox_to_frame` returns `None` for these cases, and `utils.validate_response` catches invalid responses before they leave your server.
+* **Boxes are global.** Bounding boxes must be normalized to the full source frame, not to the 960x540 image you received. At Level 1 and Level 2, a box normalized to the transmitted view may still pass validation but will be interpreted at the wrong position in the source frame. Use `utils.view_bbox_to_global` when converting detections from the current view.
+* **`requested_view` must contain integers.** `2500.0` is not `2500`. Round and cast camera coordinates before returning them.
+* **No unknown fields.** The response schema rejects fields it does not recognise, so do not add debugging keys to the payload.
+* **Echo `request_id` and `frame` exactly.** A mismatch is treated as an invalid response.
+* **An unknown or misspelled `object_id` fails the response.** Use only values from `dtos.OBJECT_CLASSES`.
+* **Do not let your model raise an exception.** An exception means no response, and the frame is scored with no detections. Catch errors and return a valid response whenever possible.
+* **Warm up your model before the attempt starts.** The first inference is often the slowest, and there is no additional timing allowance for it.

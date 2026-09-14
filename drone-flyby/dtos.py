@@ -219,7 +219,7 @@ class DroneFlybyPredictionDto(BaseModel):
     object_id: str
     # [x1, y1, x2, y2] normalized against original_width and original_height,
     # so a box at source x = 1920 has x = 0.5 at every resolution level and
-    # wherever the camera happens to be. Never normalized to the 960x540 view.
+    # wherever the camera happens to be.
     bbox: NormalizedBoundingBox
     confidence: Number
 
@@ -286,9 +286,8 @@ class DroneFlybyPredictResponseDto(BaseModel):
     # Both of these must match the request exactly.
     request_id: str
     frame: FrameNumber
-    # Your best prediction for the entire source frame, not just the crop you
-    # were sent. At most 500 - which also bounds how many stale tracks you can
-    # afford to keep replaying.
+    # Your best prediction for the entire source frame, covering objects
+    # inside and outside the crop that arrived with the request. At most 500.
     annotations: conlist(DroneFlybyPredictionDto, max_length=500)
     # Omit or set to null to leave the camera where it is.
     requested_view: Optional[RequestedViewDto] = None
