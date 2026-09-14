@@ -5,6 +5,10 @@ payloads, the same camera rules, the same COCO mAP at IoU 0.50. Use it to find
 out whether your server actually works before you spend your one evaluation
 attempt on finding out.
 
+Like the service, it reads your annotations as predictions for the whole source
+frame and scores each frame against every object in it, not only the ones the
+camera was showing.
+
     python local_evaluator.py                     # score every frame, no clock
     python local_evaluator.py --realtime           # add the 3 fps frame clock
     python local_evaluator.py --oracle             # score the ground truth (= 1.0)
@@ -49,8 +53,8 @@ from dtos import (
 from utils import (
     DEFAULT_SCENE,
     center_bounds_for_level,
-    denormalize_bbox,
     frame_numbers,
+    global_bbox_to_source,
     load_annotations,
     load_frame,
     source_region_for_view,
@@ -347,11 +351,17 @@ def replay(
 
             if response is not None:
                 statistics.responses_accepted += 1
-                source_region = payload['view']['source_region_xyxy']
+                # Responses are global, so this is a plain scale by the frame
+                # size. The view's source_region_xyxy plays no part here, which
+                # is exactly what lets you answer for objects you cannot see.
                 predictions[frame] = [
                     {
                         'object_id': annotation.object_id,
-                        'bbox': denormalize_bbox(annotation.bbox, source_region),
+                        'bbox': global_bbox_to_source(
+                            annotation.bbox,
+                            payload['original_width'],
+                            payload['original_height'],
+                        ),
                         'confidence': float(annotation.confidence),
                     }
                     for annotation in response.annotations

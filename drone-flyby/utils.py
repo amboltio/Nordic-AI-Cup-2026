@@ -3,6 +3,9 @@
 Nothing here is required by the protocol. It exists so that the boring parts
 (Base64, coordinate conversion, response validation) are already solved and the
 mistakes they cause surface on your machine instead of during an attempt.
+
+The part worth reading twice is the coordinates section. What you observe is
+crop-local; what you answer is frame-global.
 """
 
 import base64
@@ -65,15 +68,29 @@ def encode_image(image: np.ndarray) -> str:
 # --------------------------------------------------------------------------- #
 # Coordinates
 # --------------------------------------------------------------------------- #
+#
+# Three coordinate systems are in play, and the protocol is deliberately
+# asymmetric about which one belongs where:
+#
+# * view-normalized  - [0, 1] inside the 960x540 image you just received;
+# * source pixels    - [0, 3840] x [0, 2160] in the full frame;
+# * frame-global     - [0, 1] across the full frame.
+#
+# You observe locally and you answer globally: every box in a response is
+# frame-global, whatever the camera happens to be showing. The conversion you
+# want after running a detector on the transmitted image is therefore
+# :func:`view_bbox_to_global`.
 
-def denormalize_bbox(
+
+def view_bbox_to_source(
     bbox: Sequence[float],
     source_region_xyxy: Sequence[int],
 ) -> Tuple[float, float, float, float]:
-    """Map a normalized view box into source pixels.
+    """Map a box normalized to the transmitted view into source pixels.
 
-    This is the conversion the evaluator applies to your detections before it
-    scores them, so use it whenever you want to reason in source coordinates.
+    ``source_region_xyxy`` comes straight from ``request.view``. This is the
+    first half of turning a detection into an answer; the second half is
+    :func:`source_bbox_to_global`.
     """
     local_x1, local_y1, local_x2, local_y2 = (float(c) for c in bbox)
     source_x1, source_y1, source_x2, source_y2 = source_region_xyxy
@@ -87,14 +104,15 @@ def denormalize_bbox(
     )
 
 
-def normalize_bbox(
+def source_bbox_to_view(
     bbox: Sequence[float],
     source_region_xyxy: Sequence[int],
 ) -> Tuple[float, float, float, float]:
-    """Map a source-pixel box into normalized view coordinates.
+    """Map a source-pixel box into coordinates normalized to the transmitted view.
 
-    The inverse of :func:`denormalize_bbox`. Useful when you detect on the full
-    frame locally but have to answer relative to a zoomed view.
+    The inverse of :func:`view_bbox_to_source`. Useful for drawing on the image
+    you received, or for cropping a known object out of it. It is *not* the
+    conversion a response needs - see :func:`source_bbox_to_global`.
     """
     x1, y1, x2, y2 = (float(c) for c in bbox)
     source_x1, source_y1, source_x2, source_y2 = source_region_xyxy
@@ -105,6 +123,69 @@ def normalize_bbox(
         (y1 - source_y1) / source_height,
         (x2 - source_x1) / source_width,
         (y2 - source_y1) / source_height,
+    )
+
+
+def source_bbox_to_global(
+    bbox: Sequence[float],
+    original_width: int = IMAGE_WIDTH,
+    original_height: int = IMAGE_HEIGHT,
+) -> Tuple[float, float, float, float]:
+    """Normalize a source-pixel box against the full frame.
+
+    This is the coordinate system every ``bbox`` in a response uses. Take the
+    dimensions from ``request.original_width`` and ``request.original_height``
+    rather than the defaults if you want to be strict about it.
+    """
+    x1, y1, x2, y2 = (float(c) for c in bbox)
+    return (
+        x1 / original_width,
+        y1 / original_height,
+        x2 / original_width,
+        y2 / original_height,
+    )
+
+
+def global_bbox_to_source(
+    bbox: Sequence[float],
+    original_width: int = IMAGE_WIDTH,
+    original_height: int = IMAGE_HEIGHT,
+) -> Tuple[float, float, float, float]:
+    """Scale a frame-global box back into source pixels.
+
+    The inverse of :func:`source_bbox_to_global`, and exactly what the
+    evaluator does to your annotations before it scores them. Note what it does
+    *not* do: it never consults ``source_region_xyxy``.
+    """
+    x1, y1, x2, y2 = (float(c) for c in bbox)
+    return (
+        x1 * original_width,
+        y1 * original_height,
+        x2 * original_width,
+        y2 * original_height,
+    )
+
+
+def view_bbox_to_global(
+    bbox: Sequence[float],
+    source_region_xyxy: Sequence[int],
+    original_width: int = IMAGE_WIDTH,
+    original_height: int = IMAGE_HEIGHT,
+) -> Tuple[float, float, float, float]:
+    """Lift a detection made on the transmitted view into response coordinates.
+
+    The whole local-to-global pipeline in one call, and the function most
+    solutions need on every detection:
+
+        view-normalized -> source pixels -> frame-global
+
+    At Level 0 the crop is the whole frame, so this is the identity. At Level 1
+    and Level 2 it is not, and skipping it puts every box in the wrong place.
+    """
+    return source_bbox_to_global(
+        view_bbox_to_source(bbox, source_region_xyxy),
+        original_width,
+        original_height,
     )
 
 
@@ -131,12 +212,16 @@ def center_bounds_for_level(resolution_level: int) -> Tuple[int, int, int, int]:
     )
 
 
-def clip_bbox_to_view(bbox: Sequence[float], epsilon: float = 1e-6):
-    """Clip a normalized box into [0, 1], or return None if nothing is left.
+def clip_bbox_to_frame(bbox: Sequence[float], epsilon: float = 1e-6):
+    """Clip a frame-global box into [0, 1], or return None if nothing is left.
 
     A box that has been clipped down to zero width or height is invalid, and
     an invalid box fails the whole response. Returning None here lets you drop
     it instead of losing the frame.
+
+    Worth remembering when you carry detections forward: a remembered object
+    that has drifted off the edge of the frame has to be dropped, not squashed
+    against the border.
     """
     x1, y1, x2, y2 = (float(c) for c in bbox)
     x1, x2 = max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))
@@ -178,8 +263,9 @@ def validate_response(response: DroneFlybyPredictResponseDto) -> None:
             raise ValueError(f'{prefix}: bbox coordinates must be finite')
         if not 0 <= x1 < x2 <= 1 or not 0 <= y1 < y2 <= 1:
             raise ValueError(
-                f'{prefix}: bbox {list(annotation.bbox)} is not a normalized '
-                f'[x1, y1, x2, y2] box with x1 < x2 and y1 < y2 inside [0, 1]'
+                f'{prefix}: bbox {list(annotation.bbox)} is not a source-frame '
+                f'normalized [x1, y1, x2, y2] box with x1 < x2 and y1 < y2 '
+                f'inside [0, 1]'
             )
         confidence = float(annotation.confidence)
         if not math.isfinite(confidence) or not 0 <= confidence <= 1:
@@ -287,8 +373,9 @@ def load_annotations(frame: int, scene: str = DEFAULT_SCENE) -> List[Dict]:
     """Load the ground-truth detections for one frame.
 
     Boxes are ``[x1, y1, x2, y2]`` in source pixels, which is the coordinate
-    system you are scored in but *not* the one you answer in. Live responses
-    are normalized to the received view; see :func:`normalize_bbox`.
+    system you are scored in. A response uses the same geometry, normalized
+    against the full frame; :func:`source_bbox_to_global` converts these
+    straight into answers.
     """
     path = scene_directory(scene) / 'annotations' / f'frame_{frame:06d}.json'
     with open(path) as handle:

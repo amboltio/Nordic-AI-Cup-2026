@@ -4,7 +4,17 @@ These models mirror the evaluation service exactly. Keep them in sync: the
 evaluator validates your response with the same rules, and a response that
 fails validation is discarded together with every detection in it.
 
-Two deliberate asymmetries are worth knowing about:
+The asymmetry to internalise first is the protocol's, not the models':
+
+* What you receive is **crop-local**. A 960x540 image of wherever the camera is
+  pointed, plus the ``source_region_xyxy`` that says which part of the source
+  frame it covers.
+* What you send back is **frame-global**. ``annotations`` is your best
+  prediction for the entire current source frame, with every box normalized
+  against ``original_width`` and ``original_height``. Objects outside the
+  current crop are valid answers.
+
+Two smaller asymmetries in the models themselves:
 
 * The request models are permissive. If the evaluator ever gains a field, your
   server keeps running instead of rejecting the frame.
@@ -110,7 +120,9 @@ class DroneFlybyViewDto(BaseModel):
     width: StrictInt
     height: StrictInt
     # [x1, y1, x2, y2] in source pixels: where this view was taken from. Use it
-    # to map detections back into the coordinate system you are scored in.
+    # to lift detections you make on this image into the frame-global
+    # coordinates a response uses. The evaluator never applies it to your
+    # answer; see utils.view_bbox_to_global.
     source_region_xyxy: PixelBoundingBox
 
     model_config = ConfigDict(extra='ignore')
@@ -196,12 +208,18 @@ class DroneFlybyPredictRequestDto(BaseModel):
 # --------------------------------------------------------------------------- #
 
 class DroneFlybyPredictionDto(BaseModel):
-    """One detection, relative to the exact image in the matching request."""
+    """One detection anywhere in the source frame of the matching request.
+
+    Not "in the image you received": a detection you are still tracking from an
+    earlier frame is a perfectly good annotation even when the camera is now
+    pointed somewhere else entirely.
+    """
 
     # Must be one of OBJECT_CLASSES, case-sensitive.
     object_id: str
-    # [x1, y1, x2, y2] normalized to the received 960x540 view, so x = 480
-    # becomes 0.5 at every resolution level.
+    # [x1, y1, x2, y2] normalized against original_width and original_height,
+    # so a box at source x = 1920 has x = 0.5 at every resolution level and
+    # wherever the camera happens to be. Never normalized to the 960x540 view.
     bbox: NormalizedBoundingBox
     confidence: Number
 
@@ -228,7 +246,7 @@ class DroneFlybyPredictionDto(BaseModel):
         # rejected box takes the whole response down with it.
         if not 0 <= x1 < x2 <= 1 or not 0 <= y1 < y2 <= 1:
             raise ValueError(
-                'bbox must use normalized view coordinates in '
+                'bbox must use source-frame normalized coordinates in '
                 '[x1, y1, x2, y2] order'
             )
         return value
@@ -263,11 +281,14 @@ class RequestedViewDto(BaseModel):
 
 
 class DroneFlybyPredictResponseDto(BaseModel):
-    """Detections for one view, plus where the camera should look next."""
+    """Whole-frame detections, plus where the camera should look next."""
 
     # Both of these must match the request exactly.
     request_id: str
     frame: FrameNumber
+    # Your best prediction for the entire source frame, not just the crop you
+    # were sent. At most 500 - which also bounds how many stale tracks you can
+    # afford to keep replaying.
     annotations: conlist(DroneFlybyPredictionDto, max_length=500)
     # Omit or set to null to leave the camera where it is.
     requested_view: Optional[RequestedViewDto] = None

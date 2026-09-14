@@ -1,9 +1,17 @@
 """A baseline that answers the protocol correctly and detects almost nothing.
 
 The point of this file is the plumbing, not the accuracy: it shows you how to
-decode a view, turn pixel boxes into the normalized coordinates the evaluator
-expects, and drive the camera without ever sending an illegal command. Replace
-``detect`` with your model and ``choose_next_view`` with your camera policy.
+decode a view, lift boxes out of that view into the frame-global coordinates
+the evaluator expects, and drive the camera without ever sending an illegal
+command. Replace ``detect`` with your model and ``choose_next_view`` with your
+camera policy.
+
+It is deliberately stateless. It answers with what it can see right now, which
+means that every time it zooms to Level 1 or Level 2 it stops reporting the
+rest of the frame - and a frame's ground truth counts whether or not the camera
+was pointed at it. Carrying detections forward between frames is the obvious
+first improvement; the README's "Memory and tracking" section describes what
+that involves and where it goes wrong.
 
 Run ``python local_evaluator.py`` to see what it scores. It will be close to
 zero, which is the honest starting point.
@@ -22,7 +30,7 @@ from dtos import (
     DroneFlybyPredictResponseDto,
     RequestedViewDto,
 )
-from utils import clip_bbox_to_view, decode_view
+from utils import clip_bbox_to_frame, decode_view, view_bbox_to_global
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +54,7 @@ def predict(request: DroneFlybyPredictRequestDto) -> DroneFlybyPredictResponseDt
     # Never let a modelling error cost you the frame. An empty list still
     # scores the frame; an exception loses it and every detection in it.
     try:
-        annotations = detect(image)
+        annotations = detect(image, request)
     except Exception:
         logger.exception('Detector failed on frame %s', request.frame)
         annotations = []
@@ -71,14 +79,22 @@ MAXIMUM_BOX_PIXELS = 320
 MAXIMUM_PROPOSALS = 20
 
 
-def detect(image: np.ndarray) -> List[DroneFlybyPredictionDto]:
+def detect(
+    image: np.ndarray,
+    request: DroneFlybyPredictRequestDto,
+) -> List[DroneFlybyPredictionDto]:
     """Propose boxes around whatever stands out from the ground.
 
     This is edge detection, not object detection: it has no idea what it is
     looking at, so it labels everything ``car`` with low confidence. It exists
     to show the coordinate conversion on real data. Swap it out.
+
+    It takes the request as well as the image because a detection is made in
+    view coordinates and has to be answered in frame-global ones, and the
+    geometry for that conversion lives on the request.
     """
     height, width = image.shape[:2]
+    source_region = request.view.source_region_xyxy
     grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(cv2.GaussianBlur(grey, (3, 3), 0), 60, 180)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
@@ -98,12 +114,26 @@ def detect(image: np.ndarray) -> List[DroneFlybyPredictionDto]:
 
     annotations: List[DroneFlybyPredictionDto] = []
     for area_ratio, (x, y, box_width, box_height) in proposals[:MAXIMUM_PROPOSALS]:
-        # Boxes leave your model in pixels and have to reach the evaluator
-        # normalized to this exact 960x540 view.
-        bbox = clip_bbox_to_view(
-            (x / width, y / height, (x + box_width) / width, (y + box_height) / height)
+        # Boxes leave your model in the pixels of this 960x540 image. Getting
+        # them to the evaluator takes two steps: normalize to the view, then
+        # lift that through source_region_xyxy into frame-global coordinates.
+        # At Level 0 the second step changes nothing; at Level 1 and Level 2 it
+        # is the difference between a hit and a box in the wrong place.
+        view_bbox = (
+            x / width,
+            y / height,
+            (x + box_width) / width,
+            (y + box_height) / height,
         )
-        # clip_bbox_to_view returns None when nothing survives clipping. Drop
+        bbox = clip_bbox_to_frame(
+            view_bbox_to_global(
+                view_bbox,
+                source_region,
+                request.original_width,
+                request.original_height,
+            )
+        )
+        # clip_bbox_to_frame returns None when nothing survives clipping. Drop
         # those: one degenerate box invalidates the entire response.
         if bbox is None:
             continue
